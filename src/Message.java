@@ -1,6 +1,10 @@
 public class Message {
     public static final int TAMANHO_MENSAGEM = 10;
     public static final String SEPARADOR = "|";
+    public static final int REQUEST = 1;
+    public static final int GRANT = 2;
+    public static final int RELEASE = 3;
+
 
     public final int type;
     public final int processId;
@@ -22,7 +26,7 @@ public class Message {
         return message + filling;
     }
 
-    public Message transformaString(String mensagem){
+    public static Message transformaString(String mensagem){
         String[] texts = mensagem.split("\\" + SEPARADOR);
         if(texts.length >= 2) {
             try{
@@ -39,9 +43,9 @@ public class Message {
     @Override
     public String toString(){
         String typeStr;
-        if(type == 1){
+        if(type == REQUEST){
             typeStr = "REQUEST";
-        } else if(type == 2){
+        } else if(type == GRANT){
             typeStr = "GRANT";
         } else typeStr = "RELEASE";
         return String.format("%s (ID: %d)", typeStr, processId);
