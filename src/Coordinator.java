@@ -35,8 +35,7 @@ public class Coordinator {
                 String texto = new String(packet.getData()).trim();
                 Message msg = Message.transformaString(texto);
 
-                writeLog(msg);
-
+                new Thread(() -> writeLog(msg)).start();
                 new Thread(() -> threadProcessamento(msg, packet, socket)).start();
             }
 
