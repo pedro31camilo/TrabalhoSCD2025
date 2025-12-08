@@ -26,7 +26,7 @@ public class Message {
         return message + filling;
     }
 
-    public static Message transformaString(String mensagem){
+    public static Message transformaString(String mensagem){ //Transforma a String em Objeto Message
         String[] texts = mensagem.split("\\" + SEPARADOR);
         if(texts.length >= 2) {
             try{
