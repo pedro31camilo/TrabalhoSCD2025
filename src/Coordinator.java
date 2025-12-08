@@ -8,7 +8,9 @@ public class Coordinator {
 
     private static final Queue<Integer> Q = new LinkedList<>();
     private static final String LOG_FILE = "coordinator_log.txt";
-    private static HashMap<Integer, Integer> contadorDeProcessos = new HashMap<>();
+    private static final HashMap<Integer, Integer> contadorDeProcessos = new HashMap<>();
+
+    private static final HashMap<Integer, InetSocketAddress> enderecosProcessos = new HashMap<>();
 
     public static void main(String[] args) {
         iniciarThreadRecepcao();
@@ -16,10 +18,9 @@ public class Coordinator {
     }
 
     private static void iniciarThreadRecepcao() {
-
         new Thread(() -> {
             threadAtendimento();
-        }).start();
+        }, "Thread-Atendimento").start();
     }
 
     private static void threadAtendimento() {
@@ -32,11 +33,15 @@ public class Coordinator {
                 DatagramPacket packet = new DatagramPacket(buf, buf.length);
 
                 socket.receive(packet);
-                String texto = new String(packet.getData()).trim();
+                String texto = new String(packet.getData(), 0, packet.getLength()).trim();
                 Message msg = Message.transformaString(texto);
 
-                new Thread(() -> writeLog(msg)).start();
-                new Thread(() -> threadProcessamento(msg, packet, socket)).start();
+                if (msg != null) {
+                    writeLog(msg);
+
+                    new Thread(() -> threadProcessamento(msg, packet, socket),
+                            "Thread-Processamento-" + msg.getProcessId()).start();
+                }
             }
 
         } catch (Exception e) {
@@ -46,42 +51,54 @@ public class Coordinator {
 
     private static void threadProcessamento(Message m, DatagramPacket pacote, DatagramSocket socket) {
         synchronized (Q) {
-            if (m.getType() == m.REQUEST) {
+            if (m.getType() == Message.REQUEST) {
+                InetSocketAddress enderecoProcesso = new InetSocketAddress(
+                        pacote.getAddress(),
+                        pacote.getPort()
+                );
+                enderecosProcessos.put(m.getProcessId(), enderecoProcesso);
+
                 if (Q.isEmpty()) {
-                    enviarGrant(m.getProcessId(), pacote, socket);
+                    enviarGrant(m.getProcessId(), socket);
                 }
 
                 Q.add(m.getProcessId());
             }
-
-            else if (m.getType() == m.RELEASE) {
-                Q.remove();
+            else if (m.getType() == Message.RELEASE) {
+                Integer processoLiberado = Q.poll();
 
                 if (!Q.isEmpty()) {
-                    enviarGrant(Q.peek(), pacote, socket);
+                    enviarGrant(Q.peek(), socket);
                 }
             }
-
         }
     }
 
-    private static void enviarGrant(int processId, DatagramPacket pacote, DatagramSocket socket) {
+    private static void enviarGrant(int processId, DatagramSocket socket) {
         try {
-            Message grant = new Message(2, processId);
+            InetSocketAddress destino = enderecosProcessos.get(processId);
+
+            if (destino == null) {
+                System.err.println("ERRO: Endereço do processo " + processId + " não encontrado!");
+                return;
+            }
+
+            Message grant = new Message(Message.GRANT, processId);
             byte[] data = grant.transformaMessage().getBytes();
 
             DatagramPacket resp = new DatagramPacket(
                     data,
                     data.length,
-                    pacote.getAddress(),
-                    pacote.getPort()
+                    destino.getAddress(),
+                    destino.getPort()
             );
 
             socket.send(resp);
 
-            incrementarContador(grant.getProcessId());
+            incrementarContador(processId);
             writeLog(grant);
         } catch (Exception e) {
+            System.err.println("Erro ao enviar GRANT para processo " + processId);
             e.printStackTrace();
         }
     }
@@ -92,14 +109,13 @@ public class Coordinator {
 
     private static void writeLog(Message m) {
         synchronized (FileHelper.class) {
-
             String timestamp = java.time.LocalDateTime.now()
                     .format(java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss.SSS"));
 
             String tipo = switch (m.getType()) {
-                case 1 -> "REQUEST";
-                case 2 -> "GRANT";
-                case 3 -> "RELEASE";
+                case Message.REQUEST -> "REQUEST";
+                case Message.GRANT -> "GRANT";
+                case Message.RELEASE -> "RELEASE";
                 default -> "UNKNOWN";
             };
 
@@ -118,41 +134,49 @@ public class Coordinator {
             Scanner scanner = new Scanner(System.in);
 
             while (true) {
-                System.out.println("\nComandos disponíveis:");
-                System.out.println("1) fila");
-                System.out.println("2) contadores");
-                System.out.println("3) sair");
+                System.out.println("\n========================================");
+                System.out.println("Comandos disponíveis:");
+                System.out.println("1) fila         - Ver processos na fila");
+                System.out.println("2) contadores   - Ver grants por processo");
+                System.out.println("3) sair         - Encerrar coordenador");
+                System.out.println("========================================");
                 System.out.print("> ");
 
-                int cmd = scanner.nextInt();
+                try {
+                    int cmd = scanner.nextInt();
 
-                switch (cmd) {
-                    case 1:
-                        imprimirFila();
-                        break;
+                    switch (cmd) {
+                        case 1:
+                            imprimirFila();
+                            break;
 
-                    case 2:
-                        imprimirContadores();
-                        break;
+                        case 2:
+                            imprimirContadores();
+                            break;
 
-                    case 3:
-                        System.out.println("Encerrando coordenador...");
-                        System.exit(0);
-                        break;
+                        case 3:
+                            System.out.println("Encerrando coordenador...");
+                            scanner.close();
+                            System.exit(0);
+                            break;
 
-                    default:
-                        System.out.println("Comando não reconhecido.");
+                        default:
+                            System.out.println("Comando não reconhecido.");
+                    }
+                } catch (Exception e) {
+                    System.out.println("Entrada inválida. Digite um número.");
+                    scanner.nextLine();
                 }
             }
-        }).start();
+        }, "Thread-Interface").start();
     }
 
     private static void imprimirFila() {
         synchronized (Q) {
             if (Q.isEmpty()) {
-                System.out.println("Fila vazia.");
+                System.out.println("✓ Fila vazia.");
             } else {
-                System.out.println("Fila atual: " + Q);
+                System.out.println("Fila atual (ordem): " + Q);
             }
         }
     }
@@ -160,12 +184,17 @@ public class Coordinator {
     private static void imprimirContadores() {
         synchronized (Coordinator.class) {
             if (contadorDeProcessos.isEmpty()) {
-                System.out.println("Nenhum processo foi atendido ainda.");
+                System.out.println("✓ Nenhum processo foi atendido ainda.");
             } else {
-                System.out.println("Quantidade de grants por processo:");
+                System.out.println("\nQuantidade de GRANTs enviados:");
+                System.out.println("─────────────────────────────");
                 contadorDeProcessos.forEach((id, qtd) -> {
-                    System.out.println("Processo " + id + " -> " + qtd + " grants");
+                    System.out.printf("  Processo %d → %d grants\n", id, qtd);
                 });
+
+                int total = contadorDeProcessos.values().stream()
+                        .mapToInt(Integer::intValue).sum();
+                System.out.println("─────────────────────────────");
             }
         }
     }

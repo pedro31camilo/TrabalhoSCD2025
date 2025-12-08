@@ -3,174 +3,139 @@ import java.net.*;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.Random;
 
 public class Processo {
     private static final String coordinatorIp = "127.0.0.1";
     private static final int coordinatorPort = 5000;
     private static final String RESULT_FILE = "resultado.txt";
-    private static final int timeout = 5000;
+    private static final int timeout = 500000;
 
     private final Lock rcLock = new ReentrantLock();
-    private final Condition grantReceived = rcLock.newCondition();
+    private final Condition grantArrived = rcLock.newCondition();
     private volatile boolean isRunning = true;
-
     private DatagramSocket socket;
     private InetSocketAddress coordDestination;
-
     private final int processId;
     private final int repetitions;
     private final int sleepTime;
-    private volatile Message receivedGrantMessage = null;
+    private Message receivedGrant = null;
+    private final Random random = new Random();
 
-    public Processo(int processId, int reps, int sleepT){
+    public Processo(int processId, int reps, int sleepT) {
         this.processId = processId;
         this.repetitions = reps;
         this.sleepTime = sleepT;
+        try {
+            this.socket = new DatagramSocket(5001 + processId);
+        } catch (SocketException e) {
+            throw new RuntimeException(e);
+        }
     }
 
-    private void startProcess(){
+    public void startProcess() {
         System.out.println("Processo " + processId + " iniciado.");
-        try(DatagramSocket processStartSocket = new DatagramSocket()){
-            this.socket = processStartSocket;
+        try {
             InetAddress coordAddress = InetAddress.getByName(coordinatorIp);
-            this.coordDestination = new InetSocketAddress(coordAddress, coordinatorPort);
-
-            System.out.println("Processo "+processId+" na porta "+socket.getLocalPort());
+            coordDestination = new InetSocketAddress(coordAddress, coordinatorPort);
+            System.out.println("Processo " + processId + " usando porta " + socket.getLocalPort());
 
             new Thread(new GrantReceiverTask(), "Receiver-" + processId).start();
 
-            for(int i = 0; i < repetitions; i++){
-                sendRequest(i+1, repetitions);
-
-                waitForGrant();
-
-                if (grantReceived.await(timeout, java.util.concurrent.TimeUnit.MILLISECONDS)) {
-                    Message grantMsgToUse = receivedGrantMessage;
-
-                    receivedGrantMessage = null;
-
-                    System.out.println("Processo " + processId + " recebeu GRANT. Entrando na RC");
-
-                    executeCriticalRegion(grantMsgToUse);
-                }
-
+            for (int i = 0; i < repetitions; i++) {
+                sendRequest(i + 1, repetitions);
+                Message grantMsg = waitForGrant();
+                System.out.println("Processo " + processId + " recebeu GRANT. Entrando na RC.");
+                executeCriticalRegion(grantMsg);
                 sendRelease();
             }
-            System.out.println("Repetições concluídas. Processo" + processId+" encerrando...");
+
+            System.out.println("Processo " + processId + " finalizado.");
         } catch (IOException e) {
-            System.err.printf("Processo %d: Erro de comunicação ou inicialização: %s\n", processId, e.getMessage());
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            System.err.printf("Processo %d: Interrompido durante a espera do GRANT.\n", processId);
+            System.err.printf("Processo %d: Erro de comunicação: %s\n", processId, e.getMessage());
         } finally {
-            isRunning = false; // Sinaliza o fim para a thread de recepção
-            if (socket != null && !socket.isClosed()) {
-                socket.close(); // Fecha o socket, o que desbloqueia a thread receptora
-            }
+            isRunning = false;
+            if (socket != null && !socket.isClosed()) socket.close();
         }
     }
 
-    private class GrantReceiverTask implements Runnable{
+    private class GrantReceiverTask implements Runnable {
         @Override
         public void run() {
             byte[] buffer = new byte[50];
-            DatagramPacket respCoordGrant = new DatagramPacket(buffer, buffer.length);
+            DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+            try {
+                while (isRunning) {
+                    socket.receive(packet);
+                    String msgStr = new String(packet.getData(), 0, packet.getLength());
+                    Message msg = Message.transformaString(msgStr);
 
-            try{
-                while (isRunning){
-                    socket.receive(respCoordGrant);
-                    String respData = new String(respCoordGrant.getData(), 0, respCoordGrant.getLength());
-                    Message coordGrant = Message.transformaString(respData);
-
-                    if(coordGrant != null && coordGrant.getType() == Message.GRANT){
-                        receivedGrantMessage = coordGrant;
+                    if (msg != null && msg.getType() == Message.GRANT) {
                         rcLock.lock();
-                        try{
-                            grantReceived.signal();
+                        try {
+                            receivedGrant = msg;
+                            grantArrived.signal();
                         } finally {
                             rcLock.unlock();
                         }
-                    } else if(coordGrant != null){
-                        System.out.println("Processo "+processId+" recebeu uma mensagem inesperada do Coordenador");
+                    } else if (msg != null) {
+                        System.out.println("Processo " + processId + " recebeu mensagem inesperada.");
                     }
                 }
             } catch (SocketException e) {
-                // Esta exceção é esperada quando o socket é fechado externamente (no bloco finally de start())
-                if (isRunning) {
-                    System.err.printf("Processo %d: Erro no socket de recepção: %s\n", processId, e.getMessage());
-                }
+
             } catch (IOException e) {
-                System.err.printf("Processo %d: Erro de IO na recepção: %s\n", processId, e.getMessage());
+                System.err.println("Erro de IO na thread de recepção: " + e.getMessage());
             }
-            System.out.printf("Processo %d: Thread de Recepção encerrada.\n", processId);
+            System.out.println("Processo " + processId + ": Thread de recepção encerrada.");
         }
     }
 
-    private void sendRequest(int current, int total) throws IOException {
-        Message processRequest = new Message(Message.REQUEST, processId);
-        sendPacket(processRequest);
-        System.out.println("Processo "+processId+" enviou REQUEST. ("+current+"/"+total+")");
-    }
-
-    private void sendPacket(Message m) throws IOException {
-        //Função para enviar pacote para o coordenador
-        String data = m.transformaMessage();
-        byte[] buffer = data.getBytes();
-        DatagramPacket packet = new DatagramPacket(buffer, buffer.length, coordDestination);
-        socket.send(packet);
-    }
-
-    private void waitForGrant() throws InterruptedException {
+    private Message waitForGrant() {
         rcLock.lock();
         try {
-            System.out.println("Processo "+processId+" aguardando GRANT.");
-            if(!grantReceived.await(timeout, java.util.concurrent.TimeUnit.MILLISECONDS)){
-                throw new InterruptedException("TIMEOUT");
+            System.out.println("Processo " + processId + " aguardando GRANT...");
+            receivedGrant = null;
+            if (!grantArrived.await(timeout, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                throw new RuntimeException("Processo " + processId + ": TIMEOUT esperando GRANT");
             }
+            return receivedGrant;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Processo interrompido", e);
         } finally {
             rcLock.unlock();
         }
     }
 
-    private void executeCriticalRegion(Message m){
-        System.out.println("Processo "+processId+" entrando na Região Crítica.");
-        try{
+    private void sendPacket(Message m) throws IOException {
+        byte[] buffer = m.transformaMessage().getBytes();
+        DatagramPacket packet = new DatagramPacket(buffer, buffer.length, coordDestination);
+        socket.send(packet);
+    }
+
+    private void sendRequest(int current, int total) throws IOException {
+        sendPacket(new Message(Message.REQUEST, processId));
+        System.out.println("Processo " + processId + " enviou REQUEST (" + current + "/" + total + ")");
+    }
+
+    private void sendRelease() throws IOException {
+        sendPacket(new Message(Message.RELEASE, processId));
+        System.out.println("Processo " + processId + " enviou RELEASE");
+    }
+
+    private void executeCriticalRegion(Message m) {
+        System.out.println("Processo " + processId + " executando RC.");
+        try {
             String timestamp = java.time.LocalDateTime.now()
                     .format(java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss.SSS"));
-
-            String tipo = switch (m.getType()) {
-                case 1 -> "REQUEST";
-                case 2 -> "GRANT";
-                case 3 -> "RELEASE";
-                default -> "UNKNOWN";
-            };
-
-            String origemOuDestino = (tipo.equals("GRANT")) ?
-                    "Destino=" + m.getProcessId() :
-                    "Origem=" + m.getProcessId();
-
-            String linha = String.format("%s | %s | %s", timestamp, tipo, origemOuDestino);
-
+            String linha = String.format("%s | Processo %d", timestamp, processId);
             FileHelper.appendToFile(linha, RESULT_FILE);
 
-            Thread.sleep(sleepTime);
-
+            long randomValue = random.nextLong(4) - 2;
+            Thread.sleep(sleepTime + randomValue);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-    }
-
-    private void sendRelease() throws IOException{
-        Message processRelease = new Message(Message.RELEASE, processId);
-        sendPacket(processRelease);
-        System.out.println("Processo "+processId+" enviou RELEASE. Saindo da RC.");
-    }
-
-    static void main() {
-        int processId = 1;
-        int reps = 5;
-        int sleepProcess = 1000;
-
-        new Processo(processId, reps, sleepProcess).startProcess();
     }
 }
