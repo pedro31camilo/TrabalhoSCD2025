@@ -65,7 +65,7 @@ public class Coordinator {
                 Q.add(m.getProcessId());
             }
             else if (m.getType() == Message.RELEASE) {
-                Integer processoLiberado = Q.poll();
+                Q.poll();
 
                 if (!Q.isEmpty()) {
                     enviarGrant(Q.peek(), socket);
